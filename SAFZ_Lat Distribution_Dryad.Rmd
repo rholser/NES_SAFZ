@@ -1,0 +1,269 @@
+---
+title: "NES SAFZ Distribution"
+author: "R.Holser"
+Date Created: February 21, 2025
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+
+
+```{r Settings, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 14, message=FALSE, error=FALSE)
+
+```
+
+Updated at `r Sys.time()`
+
+
+```{r Load Libraries, echo=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(ggExtra)
+library(ggspatial)
+library(NatParksPalettes)
+library(ggridges)
+library(scales)
+library(sf)
+library(maps)
+
+```
+
+
+
+```{r Load Data}
+# SAFZ yearly/monthly peaks at Longitudes for distribution plots
+LonSAFZ <- read.csv('Data/Lon-GGB.csv')
+
+LonSAFZ_Long <- LonSAFZ %>%
+  pivot_longer(cols = -c(Year, Lon), names_to = "Month", values_to = "Value") %>%
+  mutate(Month = factor(Month, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")),
+         Year = as.factor(Year))
+
+summary_stats <- LonSAFZ_Long %>%
+  group_by(Lon, Month) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    .groups = "drop")
+
+summary_stats_year <- LonSAFZ_Long %>%
+  group_by(Lon, Year) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    .groups = "drop")
+
+# SAFZ Locations for map
+SAFZ_All <- read.csv('Data/SAFZ_All.csv')
+
+SAFZ_All <- SAFZ_All %>%
+  filter(!is.na(Latitude), !is.na(Longitude), Longitude!=0, Year<=2020)
+
+# Seal Tracks for map
+Daily<-read.csv('Data/Daily_GGBDist.csv')
+Tracks<-read.csv('Data/Tracks_GGBDist.csv')
+All_Females<-read.csv('Data/All_Individuals_V3.csv')
+
+All_Females<- All_Females %>%
+  #Exclude manipulated females
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  mutate(fAge = as.factor(Age),
+         fYear = as.factor(Year),
+         Season = as.factor(Season),
+         TOPPID = as.factor(TOPPID),
+         SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
+         SkipBreed = ifelse(SkipBreed == "SkipL" | SkipBreed == "SkipP"| SkipBreed == "skip", "Skip", SkipBreed),
+         SkipBreed = as.factor(SkipBreed))
+
+Daily <- Daily %>%
+  # Remove trips after 2020
+  filter(Year<=2020) %>%
+  # Remove manipulated or sick animals
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor),
+         # Add a 360 degree longitude column
+         Lon360 = case_when(Lon<0 ~ Lon+360,
+                            TRUE ~ Lon),
+         # Calculate difference between median day and night depths
+         DielDiff = DayDepth - NightDepth,
+         DielDiffAbs = abs(DielDiff),
+         LatDist = (Lat-43)*111) 
+
+# Step 1: Calculate median distance to the coast for locations west of 230
+CoastCalc <- Daily %>%
+  filter(Lon360<230) %>%
+  group_by(TOPPID) %>%
+  summarize(MedDistCoast230 = median(DistCoast, na.rm = TRUE)) %>%
+  ungroup()
+
+# Step 2: Join this summary to All_Females
+All_Females <- All_Females %>%
+  left_join(CoastCalc, by = "TOPPID") 
+
+# Step 3: Join All_Females to Daily and Tracks 
+Daily <- Daily %>%
+  # Only keep trips with QC of 1 or 2
+  #filter(TrackQC <= 2) %>%
+  filter(TDRQC==1,!is.na(Lat)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230), by = "TOPPID") %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))%>%
+  left_join(CoastCalc, by = "TOPPID") 
+
+Tracks<-Tracks %>%
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200,MedDistCoast,MedDistCoast230), by = "TOPPID") %>%
+  filter(QCFlag<4, Year<=2020) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))%>%
+  group_by(TOPPID) %>%
+  # filter(max(DayOfTrip) >= 30) %>%
+  mutate(Year = first(Year),
+         PctTrip = max(DayOfTripR)/max(TripLength)) %>%
+  ungroup() %>%
+  #Only include tracks lasting more than 60% of time at sea
+  filter(PctTrip>0.6 | is.na(PctTrip)) %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(LatDist = (Lat-43)*111,
+         fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+```
+
+
+
+```{r Plot maps - Figure 1}
+#Make data points into spatial features object
+Seal_sf <- st_as_sf(Tracks, coords = c("Lon360", "Lat"), crs = 4326) %>% 
+  group_by(TOPPID) %>% 
+  ungroup()
+
+#Make data points into spatial features object
+SAFZ_sf <- st_as_sf(SAFZ_All, coords = c("Longitude", "Latitude"), crs = 4326) %>% 
+  group_by(Year,Month) %>% 
+  ungroup()
+
+SAFZ_Lines <- SAFZ_sf %>% 
+  # Convert points to lines
+  group_by(Year,Month) %>%
+  summarize(.groups = "drop", 
+            do_union = FALSE) %>% #make sure st_cast retains order of points
+  st_cast("LINESTRING") 
+
+Seal_Lines <- Seal_sf %>% 
+  # Convert points to lines
+  group_by(TOPPID) %>%
+  summarize(.groups = "drop", 
+            do_union = FALSE) %>% #make sure st_cast retains order of points
+  st_cast("LINESTRING") 
+
+
+# 360 degree longitude map (dateline is crossed by seals)
+mp1 <- fortify(map('world2', plot=FALSE, fill=TRUE))
+
+colors=natparks.pals(name="Acadia", n=11, type="continuous")
+
+ALLGGB_Map <- ggplot(data=mp1) +
+  geom_polygon(aes(x = long, y=lat, group=group))+
+  geom_sf(data=Seal_Lines,color="grey", linewidth=0.5, alpha = 0.4)+
+  geom_sf(data=subset(SAFZ_Lines, Month==9 | Month==2),aes(color = as.factor(Month)), linewidth=0.7, alpha = 0.7) +
+  coord_sf(xlim=c(175,252),ylim=c(25,65),expand=FALSE)+
+  annotation_north_arrow(which_north = "true", location = "tl", style = north_arrow_fancy_orienteering)+
+  annotation_scale(location = "bl", style = "ticks", line_width = 1.5)+
+  scale_fill_manual("Month", values=c(colors[2],colors[11]))+
+  scale_color_manual("Month", values=c(colors[2],colors[11]))+
+  ggthemes::theme_few()+
+  xlab("Latitude")+
+  ylab("Longitude")+
+  theme(legend.position = "none",
+        legend.title = element_text(face = "bold", colour = "black", size = 12),
+        legend.text = element_text(colour = "black", size = 10, hjust = 1),
+        legend.key = element_rect(fill = "gray100", color = "transparent"),
+        legend.background = element_rect(fill = "gray100", color = "black"))
+ALLGGB_Map
+
+ggsave("Figures/AllSealTracks_FebSep_noLegend_V2.png", ALLGGB, width = 8, height = 6, units = "in", dpi=600)
+
+blankmap <- ggplot(data=mp1) +
+  geom_polygon(aes(x = long, y=lat, group=group))+
+  geom_sf(data=Seal_Lines,color="grey", linewidth=0.5, alpha = 0.4)+
+  coord_sf(xlim=c(175,252),ylim=c(25,65),expand=FALSE)+
+  annotation_north_arrow(which_north = "true", location = "tl", style = north_arrow_fancy_orienteering)+
+  annotation_scale(location = "bl", style = "ticks", line_width = 1.5)+
+  ggthemes::theme_few()+
+  xlab("Latitude")+
+  ylab("Longitude")+
+  theme(legend.position = "right",
+        legend.title = element_text(face = "bold", colour = "black", size = 12),
+        legend.text = element_text(colour = "black", size = 10, hjust = 1),
+        legend.key = element_rect(fill = "gray100", color = "transparent"),
+        legend.background = element_rect(fill = "gray100", color = "black"))
+blankmap
+
+ggsave("Figures/BlankMap.png", blankmap, width = 8, height = 6, units = "in", dpi=600)
+
+
+```
+
+
+
+
+```{r Ridge Distribution x Month}
+ggplot(data=LonSAFZ_Long, aes(y=Value,x=Month, width = after_stat(density), fill=Month))+
+  geom_vridgeline(stat="ydensity", trim=FALSE, alpha = 0.85, scale = 3)+
+  scale_color_manual("Year",values=natparks.pals("Volcanoes",12))+
+  scale_fill_manual("Year",values=natparks.pals("Volcanoes",12))+
+  geom_hline(aes(yintercept = 43), linewidth=0.7)+
+  labs(y="Latitude",x="Month")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle=-60, vjust = 0, hjust=),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14),
+        legend.position = "none")+
+  facet_wrap(~Lon, nrow=1,
+             labeller = labeller(Lon = c(
+               "180" = "180\u00B0 W", "200" = "160\u00B0 W", "220" = "140\u00B0 W")))
+
+ggsave("Figures/GGB_Distribution.png", width = 9, height = 4.5, units = "in", dpi=600)
+
+```
+
+
+```{r Ridge  Distribution x Year}
+ggplot(data=LonSAFZ_Long, aes(y=Value,x=as.factor(Year), width = after_stat(density), fill=Year))+
+  geom_vridgeline(stat="ydensity", trim=FALSE, alpha = 0.85, scale = 3)+
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  geom_hline(aes(yintercept = 43), linewidth=0.7)+
+  labs(y="Latitude",x="Year")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 11),
+        axis.text.x = element_text(angle=-60, vjust = 0, hjust=),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14),
+        legend.position = "none")+
+  facet_wrap(~Lon, nrow=1,
+             labeller = labeller(Lon = c(
+               "180" = "180\u00B0 W", "200" = "160\u00B0 W", "220" = "140\u00B0 W")))
+
+ggsave("Figures/GGB_Distribution_Year.png", width = 9, height = 4.5, units = "in", dpi=600)
+
+```

@@ -1,0 +1,404 @@
+---
+title: "NES SAFZ Foraging Success"
+author: "R.Holser"
+Date Created: February 21, 2025
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+
+```{r Settings, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 14, fig.height = 10, message=FALSE, error=FALSE)
+
+```
+
+Updated at `r Sys.time()`
+
+```{r Load Libaries and Data, echo=FALSE}
+library(tidyverse)
+library(ggExtra)
+library(scico)
+library(NatParksPalettes)
+library(mgcv)
+library(MuMIn)
+library(lmtest)
+library(gratia)
+
+Daily<-read.csv('Data/Daily_SAFZDist.csv')
+SAFZ_Pct<-read.csv('Data/SAFZ_Pct.csv')
+Tracks<-read.csv('Data/Tracks_SAFZDist.csv')
+All_Females<-read.csv('Data/All_Individuals_V3.csv')
+
+SAFZ_Pct <- SAFZ_Pct %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Colony','Season'),as.factor))
+
+
+All_Females<- All_Females %>%
+  #Exclude manipulated females
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  #Convert variables to factors and standardize skip breeding categories
+  mutate(fAge = as.factor(Age),
+         fYear = as.factor(Year),
+         Season = as.factor(Season),
+         TOPPID = as.factor(TOPPID),
+         SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
+         SkipBreed = ifelse(SkipBreed == "SkipL" | SkipBreed == "SkipP"| SkipBreed == "skip", "Skip", SkipBreed),
+         SkipBreed = as.factor(SkipBreed))
+
+Daily <- Daily %>%
+  # Remove trips after 2020
+  filter(Year<=2020) %>%
+  # Only keep trips with QC of 1 or 2
+  filter(TrackQC <= 3) %>%
+  # Remove manipulated or sick animals
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor),
+         # Add a 360 degree longitude column
+         Lon360 = case_when(Lon<0 ~ Lon+360,
+                            TRUE ~ Lon),
+           # Calculate difference between median day and night depths
+         DielDiff = DayDepth - NightDepth,
+         DielDiffAbs = abs(DielDiff),
+         LatDist = (Lat-43)*111) %>%
+    left_join(select(SAFZ_Pct, TOPPID, Pct250km), by = "TOPPID")
+
+
+Tracks<-Tracks %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
+  # Add SAFZ values to tracks
+  left_join(select(SAFZ_Pct, TOPPID, Pct250km), by = "TOPPID")%>%
+  # Add Stats from All Females to Tracks
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast), by = "TOPPID") %>%
+  # Exclude low-quality tracks
+  filter(QCFlag<4) %>%
+  # Only include 2004-2020
+  filter(Year<=2020) %>%
+  group_by(TOPPID) %>%
+  # filter(max(DayOfTrip) >= 30) %>%
+  mutate(Year = first(Year),
+         PctTrip = max(DayOfTripR)/max(TripLength)) %>%
+  ungroup() %>%
+  #Only include tracks lasting more than 60% of time at sea
+  filter(PctTrip>0.6 | is.na(PctTrip)) %>%
+  # Calculate distance from 43 degrees latitude for each location estimate
+  mutate(LatDist = (Lat-43)*111,
+         fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+```
+
+
+```{r Data Wrangle}
+# Compute density data separately for each TOPPID
+dens_data_TOPPID <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(TOPPID) %>%
+  summarise(density = list(density(GGBDist)), .groups = "drop") %>%
+  mutate(x = purrr::map(density, "x"),  # Extract 'x' values from density object
+         y = purrr::map(density, "y")) %>% # Extract 'y' values from density object
+  select(TOPPID, x, y) %>%
+  unnest(cols = c(x, y)) # Unnest the density data
+
+# Find the largest maximum (global peak) for each group
+dens_maxima_TOPPID <- dens_data_TOPPID %>%
+  group_by(TOPPID) %>%
+  slice_max(y, n = 1) %>% # Select the row with the highest density value
+  select(TOPPID, x) %>%
+  rename(GGBMode = x)
+
+Track_Stats <- Tracks %>%
+  filter(Lon360<230) %>%
+  group_by(TOPPID) %>%
+  summarize(GGBMed = median(GGBDist),
+            GGBMAD = mad(GGBDist),
+            GGBIQR = IQR(GGBDist),
+            SealID = first(SealID),
+            EnergyGainRate = first(EnergyGainRate),
+            Season = first(Season),
+            Skip = first(Skip),
+            StdLength = first(StdLength),
+            Year = first(Year),
+            fYear = first(fYear),
+            Pct250km = first(Pct250km)) %>%
+  filter(!is.na(EnergyGainRate)) %>%
+  #filter(Pct250km > 0.10) %>%
+  left_join(select(dens_maxima_TOPPID,TOPPID,GGBMode),by="TOPPID") %>%
+  filter(!is.na(EnergyGainRate))
+
+# Model seasons separately, include both reproductive and skip breeding females in PM model
+PBMdlData<-subset(Track_Stats, Season == 'Post-Breeding')
+PMMdlData<-subset(Track_Stats, Season == 'Post-Molting')
+
+```
+
+
+```{r Foraging Success Distributions}
+EGRhist <- ggplot(data=Track_Stats, aes(x=EnergyGainRate)) +
+  geom_histogram()+
+  facet_wrap(~Season)
+
+EGRhist
+
+```
+
+
+## Models - PB Foraging Success ~ Mode SAFZ Dist + IQR SAFZ Dist + StLength
+
+Use REML method, set k to 6 for all smoothers, and include year and SealID as random effects. 
+
+```{r EGR~GGBMode x PB All}
+PB_EGRmdl <- gam(EnergyGainRate ~ s(GGBMode, k=6)+ s(GGBIQR, k=6) + s(StdLength, k=6) + s(fYear, bs='re')  + s(SealID, bs='re'), data=PBMdlData, na.action = "na.fail",method="REML")
+summary(PB_EGRmdl)
+gam.check(PB_EGRmdl)
+draw(PB_EGRmdl,residuals=TRUE)
+
+```
+
+
+
+```{r EGR~GGBMode x PB Final}
+
+PB_EGRmdl1 <- gam(EnergyGainRate ~ s(GGBMode, k=6) + StdLength + s(fYear, bs='re'), data=PBMdlData, na.action = "na.fail", method="REML")
+summary(PB_EGRmdl1)
+gam.check(PB_EGRmdl1)
+
+# Pull out gam smoothers for plotting later
+PB_EGRmdl1_plot <- gam(EnergyGainRate ~ s(GGBMode, k=6) + s(StdLength, k=2) + s(fYear, bs='re'), data=PBMdlData, na.action = "na.fail", method="REML")
+draw(PB_EGRmdl1_plot,residuals=TRUE)
+
+EGR_pb_obj<-plot(PB_EGRmdl1_plot,residuals=TRUE,rug=TRUE,se=TRUE,pages=0,select=1,scale=0,
+         n=500,n2=40,n3=3,theta=30,phi=30,jit=FALSE,xlab=NULL,
+         ylab=NULL,main=NULL,ylim=NULL,xlim=NULL,too.far=0.1,
+         all.terms=FALSE,shade=TRUE,shade.col="gray80",shift=coef(PB_EGRmdl1_plot)[1],
+         trans=I,seWithMean=FALSE,unconditional=FALSE,by.resids=FALSE,
+         scheme=0)
+
+EGR_pb_ggb <- EGR_pb_obj[[1]] # just one smooth so select the first component
+EGR_pb_df <- as.data.frame(EGR_pb_ggb[c("x", "se", "fit")])
+EGR_pb_df <- EGR_pb_df %>%
+  rename(GGBMode = x) %>%
+  mutate(fit = fit + coef(PB_EGRmdl1_plot)[1])
+
+EGR_pb_stdl <- EGR_pb_obj[[2]] # just one smooth so select the first component
+EGR_pb_df2 <- as.data.frame(EGR_pb_stdl[c("x", "se", "fit")])
+EGR_pb_df2 <- EGR_pb_df2 %>%
+  rename(StdLength = x) %>%
+  mutate(fit = fit + coef(PB_EGRmdl1_plot)[1])
+
+```
+
+
+```{r EGR~ PB StlLength only}
+
+PB_EGRmdl2 <- gam(EnergyGainRate ~ StdLength + s(fYear, bs='re'), data=PBMdlData, na.action = "na.fail",method="REML")
+summary(PB_EGRmdl2)
+gam.check(PB_EGRmdl2)
+
+```
+
+```{r EGR~ PB Intercept}
+
+PB_EGRmdl3 <- gam(EnergyGainRate ~ 1, data=PBMdlData, na.action = "na.fail",method="REML")
+summary(PB_EGRmdl3)
+gam.check(PB_EGRmdl3)
+
+```
+
+
+```{r PB EGR Model Comparisons}
+AICc(PB_EGRmdl, PB_EGRmdl1, PB_EGRmdl2, PB_EGRmdl3)
+
+```
+
+
+
+## Models - PM Foraging Success ~ MedGGBDist + IQRGGBDist 
+
+Year included as a random effect, SealID not significant as a random effect and not included in models. All predictor smooths with k=6.
+
+```{r EGR~GGBMode x PM All Smooths}
+
+PM_EGRmdl_smooth <- gam(EnergyGainRate ~ s(GGBMode, k=6) + s(GGBIQR, k=6) + s(StdLength, k=6)  + s(fYear, bs='re'), data=PMMdlData, na.action = "na.fail", method = "REML")
+
+summary(PM_EGRmdl_smooth)
+gam.check(PM_EGRmdl_smooth)
+draw(PM_EGRmdl_smooth, residuals = TRUE)
+
+EGR_pb_ggb <- EGR_pb_obj[[1]] # just one smooth so select the first component
+EGR_pb_df <- as.data.frame(EGR_pb_ggb[c("x", "se", "fit")])
+EGR_pb_df <- EGR_pb_df %>%
+  rename(GGBMode = x) %>%
+  mutate(fit = fit + coef(PB_EGRmdl1_plot)[1])
+
+EGR_pb_stdl <- EGR_pb_obj[[2]] # just one smooth so select the first component
+EGR_pb_df2 <- as.data.frame(EGR_pb_stdl[c("x", "se", "fit")])
+EGR_pb_df2 <- EGR_pb_df2 %>%
+  rename(StdLength = x) %>%
+  mutate(fit = fit + coef(PB_EGRmdl1_plot)[1])
+
+```
+
+
+
+All relationships are linear, regenerate model with linear fixed effects.
+
+```{r EGR~GGBMode x PM All Linear}
+PM_EGRmdl_linear <- gam(EnergyGainRate ~ GGBMode + GGBIQR + StdLength + s(fYear, bs='re'), data=PMMdlData, na.action = "na.fail", method="REML")
+
+summary(PM_EGRmdl_linear)
+
+```
+
+Standard length only model, linear fixed effect. Retain year as a random effect.
+
+```{r EGR~ PM StLength Only}
+
+PM_EGRmdl <- gam(EnergyGainRate ~ StdLength + s(fYear, bs='re'), data=PMMdlData, na.action = "na.fail", method="REML")
+summary(PM_EGRmdl)
+gam.check(PM_EGRmdl)
+
+#Standard length smooth for plotting
+PM_EGRmdl_plot <- gam(EnergyGainRate ~ s(GGBMode, k=6) + s(StdLength, k=6) +  s(fYear, bs='re'), data=PMMdlData, na.action = "na.fail", method="REML")
+EGR_pm_obj<-plot(PM_EGRmdl_plot,residuals=TRUE,rug=TRUE,se=TRUE,pages=0,select=1,scale=0,
+         n=500,n2=40,n3=3,theta=30,phi=30,jit=FALSE,xlab=NULL,
+         ylab=NULL,main=NULL,ylim=NULL,xlim=NULL,too.far=0.1,
+         all.terms=FALSE,shade=TRUE,shade.col="gray80",shift=coef(PM_EGRmdl_plot)[1],
+         trans=I,seWithMean=FALSE,unconditional=FALSE,by.resids=FALSE,
+         scheme=0)
+
+EGR_pm_ggb <- EGR_pm_obj[[1]] # just one smooth so select the first component
+EGR_pm_df <- as.data.frame(EGR_pm_ggb[c("x", "se", "fit")])
+EGR_pm_df <- EGR_pm_df %>%
+  rename(GGBMode = x) %>%
+  #shift smoother to plot on raw data
+  mutate(fit = fit + coef(PM_EGRmdl_plot)[1])
+
+EGR_pm_stdl <- EGR_pm_obj[[2]] # just one smooth so select the first component
+EGR_pm_df2 <- as.data.frame(EGR_pm_stdl[c("x", "se", "fit")])
+EGR_pm_df2 <- EGR_pm_df2 %>%
+  rename(StdLength = x) %>%
+  #shift smoother to plot on raw data
+  mutate(fit = fit + coef(PM_EGRmdl_plot)[1])
+```
+
+
+```{r EGR~ PM Intercept}
+
+PM_EGRmdl3 <- gam(EnergyGainRate ~ 1, data=PMMdlData, na.action = "na.fail", method="REML")
+summary(PM_EGRmdl3)
+gam.check(PM_EGRmdl3)
+
+```
+
+```{r PM EGR Model Comparisons}
+AICc(PM_EGRmdl, PM_EGRmdl_linear, PM_EGRmdl_smooth, PM_EGRmdl3)
+
+```
+
+
+
+## Figure 4 Panels
+
+```{r EGR Mdl GGBMode Plot PB, echo=FALSE}
+
+EGRPB_Scatter<-ggplot()+
+  geom_point(data=subset(PBMdlData), aes(y=EnergyGainRate, x=GGBMode), color = "steelblue3",alpha=0.7, size=2.5, shape=21, fill="steelblue1") +
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  geom_rug(data = PBMdlData, mapping = aes(x = GGBMode, y = NULL), sides = "b") +
+  geom_ribbon(data=EGR_pb_df, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = GGBMode),
+              alpha = 0.5, fill="darkgrey") +
+  geom_line(data=EGR_pb_df, aes(x=GGBMode, y=fit), linewidth=1) +
+  xlim(-500,1500)+
+  ylim(-15,50)+
+  labs(x="Mode of Distance from SAFZ (km)",y="Energy Gain Rate (MJ/day)", fill = "Count")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3, colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+EGRPB_Scatter
+ggsave("Figures/EGR_Mdl_PB.png", width = 6, height = 4, units = "in", dpi=600)
+```
+
+```{r EGR Mdl StdLength Plot PB, echo=FALSE}
+# Compute median for each Season
+
+EGRPM_Scatter<-ggplot(data=subset(PBMdlData), aes(y=EnergyGainRate, x=StdLength))+
+  geom_point(color = "steelblue3",alpha=0.7, size=2.5, shape=21, fill="steelblue1") +
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  geom_rug(data = PBMdlData, mapping = aes(x = StdLength, y = NULL), sides = "b") +
+  geom_ribbon(data=EGR_pb_df2, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = StdLength),
+              alpha = 0.5, fill = "darkgrey") +
+  geom_line(data=EGR_pb_df2, aes(x=StdLength, y=fit), linewidth=1) +
+  labs(x="Standard Length (cm)",y="Energy Gain Rate (MJ/day)", fill = "Count")+
+  ylim(-15,50)+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3, colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+EGRPM_Scatter
+ggsave("Figures/EGR-StdL_Mdl_PB.png", width = 6, height = 4, units = "in", dpi=600)
+```
+
+
+```{r EGR Mdl GGBMode Plot PM, echo=FALSE}
+
+EGRPB_Scatter<-ggplot()+
+  geom_point(data=subset(PMMdlData), aes(y=EnergyGainRate, x=GGBMode), color = "steelblue3",alpha=0.7, size=2.5, shape=21, fill="steelblue1") +
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  geom_rug(data = PMMdlData, mapping = aes(x = GGBMode, y = NULL), sides = "b") +
+  geom_ribbon(data=EGR_pm_df, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = GGBMode),
+              alpha = 0.5, fill="darkgrey") +
+  geom_line(data=EGR_pm_df, aes(x=GGBMode, y=fit), linewidth=1) +
+  xlim(-500,1500)+
+  ylim(-15,50)+
+  labs(x="Mode of Distance from SAFZ (km)",y="Energy Gain Rate (MJ/day)", fill = "Count")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3, colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+EGRPB_Scatter
+ggsave("Figures/EGR_Mdl_PM.png", width = 6, height = 4, units = "in", dpi=600)
+```
+
+```{r EGR Mdl StdLength Plot PM, echo=FALSE}
+# Compute median for each Season
+
+EGRPM_Scatter<-ggplot(data=subset(PMMdlData), aes(y=EnergyGainRate, x=StdLength))+
+  geom_point(color = "steelblue3",alpha=0.7, size=2.5, shape=21, fill="steelblue1") +
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  geom_rug(data = PMMdlData, mapping = aes(x = StdLength, y = NULL), sides = "b") +
+  geom_ribbon(data=EGR_pm_df2, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = StdLength),
+              alpha = 0.5, fill = "darkgrey") +
+  geom_line(data=EGR_pm_df2, aes(x=StdLength, y=fit), linewidth=1) +
+  labs(x="Standard Length (cm)",y="Energy Gain Rate (MJ/day)", fill = "Count")+
+  ylim(-15,50)+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3, colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+EGRPM_Scatter
+ggsave("Figures/EGR-StdL_Mdl_PM.png", width = 6, height = 4, units = "in", dpi=600)
+```
+
+
+
