@@ -10,7 +10,6 @@ output:
 ---
 
 
-
 ```{r Settings, echo=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 14, message=FALSE, error=FALSE)
 
@@ -69,15 +68,14 @@ SAFZ_All <- SAFZ_All %>%
   filter(!is.na(Latitude), !is.na(Longitude), Longitude!=0, Year<=2020)
 
 # Seal Tracks for map
-Daily<-read.csv('Data/Daily_GGBDist.csv')
-Tracks<-read.csv('Data/Tracks_GGBDist.csv')
-All_Females<-read.csv('Data/All_Individuals_V3.csv')
+Daily<-read.csv('Data/Daily_SAFZDist.csv')
+Tracks<-read.csv('Data/Tracks_SAFZDist.csv')
+All_Females<-read.csv('Data/NES_All_Individuals.csv')
 
 All_Females<- All_Females %>%
   #Exclude manipulated females
   filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
-  mutate(fAge = as.factor(Age),
-         fYear = as.factor(Year),
+  mutate(fYear = as.factor(Year),
          Season = as.factor(Season),
          TOPPID = as.factor(TOPPID),
          SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
@@ -85,8 +83,6 @@ All_Females<- All_Females %>%
          SkipBreed = as.factor(SkipBreed))
 
 Daily <- Daily %>%
-  # Remove trips after 2020
-  filter(Year<=2020) %>%
   # Remove manipulated or sick animals
   filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
   # Convert to factors
@@ -125,7 +121,7 @@ Daily <- Daily %>%
 Tracks<-Tracks %>%
   mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
   left_join(select(All_Females, TOPPID, TripLength, PctBathy1200,MedDistCoast,MedDistCoast230), by = "TOPPID") %>%
-  filter(QCFlag<4, Year<=2020) %>%
+  filter(QCFlag<4) %>%
   mutate(TOPPID = droplevels(TOPPID),
          SealID = droplevels(SealID))%>%
   group_by(TOPPID) %>%

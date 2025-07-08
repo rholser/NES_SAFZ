@@ -30,7 +30,7 @@ library(gratia)
 Daily<-read.csv('Data/Daily_SAFZDist.csv')
 SAFZ_Pct<-read.csv('Data/SAFZ_Pct.csv')
 Tracks<-read.csv('Data/Tracks_SAFZDist.csv')
-All_Females<-read.csv('Data/All_Individuals_V3.csv')
+All_Females<-read.csv('Data/NES_All_Individuals.csv')
 
 SAFZ_Pct <- SAFZ_Pct %>%
   # Convert to factors
@@ -41,8 +41,7 @@ All_Females<- All_Females %>%
   #Exclude manipulated females
   filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
   #Convert variables to factors and standardize skip breeding categories
-  mutate(fAge = as.factor(Age),
-         fYear = as.factor(Year),
+  mutate(fYear = as.factor(Year),
          Season = as.factor(Season),
          TOPPID = as.factor(TOPPID),
          SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
@@ -50,8 +49,6 @@ All_Females<- All_Females %>%
          SkipBreed = as.factor(SkipBreed))
 
 Daily <- Daily %>%
-  # Remove trips after 2020
-  filter(Year<=2020) %>%
   # Only keep trips with QC of 1 or 2
   filter(TrackQC <= 3) %>%
   # Remove manipulated or sick animals
@@ -77,8 +74,6 @@ Tracks<-Tracks %>%
   left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast), by = "TOPPID") %>%
   # Exclude low-quality tracks
   filter(QCFlag<4) %>%
-  # Only include 2004-2020
-  filter(Year<=2020) %>%
   group_by(TOPPID) %>%
   # filter(max(DayOfTrip) >= 30) %>%
   mutate(Year = first(Year),

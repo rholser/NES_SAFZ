@@ -26,8 +26,6 @@ end
 %% Read in netcdf file with ADT data and save monthly means -- ONLY need to do this once! 
 
 ncname='cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D_adt_165.06E-239.94E_25.06N-61.94N_2004-01-01-2023-06-30.nc'; 
-% ncname='cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.25deg_P1D_multi-vars_150.12E-259.88E_10.12N-64.88N_2004-01-01-2021-12-31.nc'; 
-% ncdisp(ncname)
 info=ncinfo(ncname); 
 
 lon = ncread(ncname,'longitude'); % [150, 260] step=0.125
@@ -74,10 +72,6 @@ save(strcat(infolder ,'\ADT_weekly.mat'),"adt_weekly","adt_weekly_std","year_mon
 % Use 55 cm contour (see Hristova et al. 2019)
 
 clearvars -except infolder fig_output figfolder
-
-if fig_output=='Y'
-    load(strcat(infolder ,'\Contour55colormap.mat')); 
-end
 
 % Read in ADT_weekly.mat 
 load(strcat(infolder ,'\ADT_weekly.mat')); 

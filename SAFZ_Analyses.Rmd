@@ -51,8 +51,7 @@ SAFZ_Pct <- SAFZ_Pct %>%
 All_Females<- All_Females %>%
   #Exclude manipulated females
   filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
-  mutate(fAge = as.factor(Age),
-         fYear = as.factor(Year),
+  mutate(fYear = as.factor(Year),
          Season = as.factor(Season),
          TOPPID = as.factor(TOPPID),
          SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
@@ -63,8 +62,6 @@ All_Females<- All_Females %>%
 rm(SAFZ_Pct)
 
 Daily <- Daily %>%
-  # Remove trips after 2020
-  filter(Year<=2020) %>%
   # Remove manipulated or sick animals
   filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
   # Convert to factors
@@ -92,8 +89,7 @@ All_Females <- All_Females %>%
 
 # Step 3: Join values from All_Females to Daily and Tracks
 Daily <- Daily %>%
-  # Only keep trips with QC of 1 or 2
-  #filter(TrackQC <= 2) %>%
+  # Only keep trips with QC of 1
   filter(TDRQC==1,!is.na(Lat)) %>%
   left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
   #Only include females with mediam distance from the coast greater than 450km
@@ -104,7 +100,7 @@ Daily <- Daily %>%
 Tracks<-Tracks %>%
   mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
   left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
-  filter(QCFlag<4, Year<=2020) %>%
+  filter(QCFlag<4) %>%
   mutate(TOPPID = droplevels(TOPPID),
          SealID = droplevels(SealID))%>%
   group_by(TOPPID) %>%
