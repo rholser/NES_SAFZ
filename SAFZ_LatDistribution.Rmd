@@ -193,7 +193,7 @@ ALLGGB_Map <- ggplot(data=mp1) +
         legend.background = element_rect(fill = "gray100", color = "black"))
 ALLGGB_Map
 
-ggsave("Figures/AllSealTracks_FebSep_noLegend_V2.png", ALLGGB, width = 8, height = 6, units = "in", dpi=600)
+ggsave("Figures/AllSealTracks_FebSep_noLegend_V2.png", ALLGGB_Map, width = 8, height = 6, units = "in", dpi=600)
 
 blankmap <- ggplot(data=mp1) +
   geom_polygon(aes(x = long, y=lat, group=group))+
