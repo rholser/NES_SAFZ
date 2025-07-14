@@ -1,4 +1,5 @@
 # NES_SAFZ
+[![DOI](https://zenodo.org/badge/1015169581.svg)](https://doi.org/10.5281/zenodo.15833168)
 
 Code associated with analysis of movement and foraging success of northern elephant seals in relation to the subarctic frontal zone (SAFZ).
 
