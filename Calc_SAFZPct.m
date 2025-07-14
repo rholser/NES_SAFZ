@@ -1,4 +1,6 @@
-load('Tracks_SAFZDist.mat')
+
+Tracks = readtable('D:\Dropbox\GitHub\NES_SAFZ\Data\Tracks_SAFZDist.csv');
+Daily = readtable('D:\Dropbox\GitHub\NES_SAFZ\Data\Daily_SAFZDist.csv');
 
 % Remove all data with QC worse than 2
 Tracks(Tracks.QCFlag >3,:) = [];
@@ -67,5 +69,4 @@ for i=1:size(TOPPIDs,1)
     end
 end
 
-save('D:\Dropbox\GitHub\NES_SAFZ\Data\SAFZ_Pct.mat','GGB_Pct')
 writetable(GGB_Pct,'D:\Dropbox\GitHub\NES_SAFZ\Data\SAFZ_Pct.csv')

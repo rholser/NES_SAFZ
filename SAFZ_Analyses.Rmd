@@ -286,7 +286,7 @@ PMDataAll <- PMSeedAll %>%
 
 
 ```{r PM Model - Global All}
-dielmdlPM1a <- bam(DielDiff ~ s(GGBDist) + s(DayOfTrip) + s(DayOfTrip, by=TOPPID, bs="fs", k=12)  + s(SealID, bs="re"), 
+dielmdlPM1a <- bam(DielDiff ~ s(GGBDist, k=6) + s(DayOfTrip, k=6) + s(DayOfTrip, by=TOPPID, bs="fs", , k=6)  + s(SealID, bs="re"), 
                    data=PMDataAll, na.action = "na.fail", method='REML')
 
 dielmdlPM1b <- gam(DielDiff ~ 1, data=PMDataAll, na.action = "na.fail", method='REML')

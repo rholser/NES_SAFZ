@@ -73,7 +73,6 @@ Tracks.GGBDist(Tracks.GGBLat>Tracks.Lat) = -Tracks.GGBDist(Tracks.GGBLat>Tracks.
 Daily.GGBDist(Daily.GGBLat>Daily.Lat) = -Daily.GGBDist(Daily.GGBLat>Daily.Lat);
 
 % Save new Tracks file
-save('D:\Dropbox\GitHub\NES_SAFZ\Data\Tracks_SAFZDist.mat','Tracks','Daily')
 writetable(Tracks,'D:\Dropbox\GitHub\NES_SAFZ\Data\Tracks_SAFZDist.csv')
 writetable(Daily,'D:\Dropbox\GitHub\NES_SAFZ\Data\Daily_SAFZDist.csv')
 
