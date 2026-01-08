@@ -1,0 +1,713 @@
+---
+title: "SAFZ Distance and Diel Behavior"
+author: "R.Holser"
+Date Created: February 21, 2025
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+
+```{r Settings, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 14, fig.height = 10, message=FALSE, error=FALSE)
+
+```
+
+Updated at `r Sys.time()`
+
+```{r Load Libaries and Data, echo=FALSE}
+library(tidyverse)
+library(ggExtra)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(scico)
+library(NatParksPalettes)
+library(ggridges)
+library(mgcv)
+library(nlme)
+library(zoo)
+library(MuMIn)
+library(lmtest)
+library(modelsummary)
+library(scales)
+library(lubridate)
+library(gratia)
+library(car)
+library(e1071)
+
+
+Daily<-read.csv('Data/Daily_SAFZDist.csv')
+Tracks<-read.csv('Data/Tracks_SAFZDist.csv')
+SAFZ_Pct<-read.csv('Data/SAFZ_Pct.csv')
+All_Females<-read.csv('Data/NES_All_Individuals.csv')
+
+SAFZ_Pct <- SAFZ_Pct %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Colony','Season'),as.factor))
+
+All_Females<- All_Females %>%
+  #Exclude manipulated females
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  mutate(fYear = as.factor(Year),
+         Season = as.factor(Season),
+         TOPPID = as.factor(TOPPID),
+         SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
+         SkipBreed = ifelse(SkipBreed == "SkipL" | SkipBreed == "SkipP"| SkipBreed == "skip", "Skip", SkipBreed),
+         SkipBreed = as.factor(SkipBreed)) %>%
+  left_join(select(SAFZ_Pct, TOPPID, Pct250km), by = "TOPPID")
+
+rm(SAFZ_Pct)
+
+Daily <- Daily %>%
+  # Remove manipulated or sick animals
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor),
+       DateTime = as.POSIXct(DateTime, tz = "UTC", format = '%d-%b-%Y %H:%M:%S'),
+       DayOfYear = yday(DateTime),
+         # Add a 360 degree longitude column
+         Lon360 = case_when(Lon<0 ~ Lon+360,
+                            TRUE ~ Lon),
+         # Calculate difference between median day and night depths
+         DielDiff = DayDepth - NightDepth,
+         DielDiffAbs = abs(DielDiff),
+         LatDist = (Lat-43)*111) 
+
+# Step 1: Calculate median distance from coast
+CoastCalc <- Daily %>%
+  filter(Lon360<230) %>%
+  group_by(TOPPID) %>%
+  summarize(MedDistCoast230 = median(DistCoast, na.rm = TRUE)) %>%
+  ungroup()
+
+# Step 2: Join this summary to All_Females
+All_Females <- All_Females %>%
+  left_join(CoastCalc, by = "TOPPID") 
+
+# Step 3: Join values from All_Females to Daily and Tracks
+Daily <- Daily %>%
+  # Only keep trips with QC of 1
+  filter(TDRQC==1,!is.na(Lat)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+Tracks<-Tracks %>%
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
+  filter(QCFlag<4) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))%>%
+  group_by(TOPPID) %>%
+  # filter(max(DayOfTrip) >= 30) %>%
+  mutate(Year = first(Year),
+         PctTrip = max(DayOfTripR)/max(TripLength)) %>%
+  ungroup() %>%
+  #Only include tracks lasting more than 60% of time at sea
+  filter(PctTrip>0.6 | is.na(PctTrip)) %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(LatDist = (Lat-43)*111,
+         fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+DailyAll<-Daily %>%
+  # Exclude all data east of -130 lonitude
+  filter(Lon360 < 230) %>%
+  group_by(TOPPID) %>%
+  mutate(Year = first(Year)) %>%
+  ungroup() %>%
+  mutate(fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+PBSeedAll <- DailyAll %>%
+  filter(Season=="Post-Breeding") %>%
+  filter(!is.na(DielDiff)) %>%
+  #filter(Buoyancy != "Neutral") %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+PMSeedAll <- DailyAll %>%
+  filter(Season=="Post-Molting") %>%
+  filter(!is.na(DielDiff)) %>%
+  #filter(Buoyancy != "Neutral") %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+SampleSizeSeasonYear <- DailyAll %>%
+  group_by(fYear,Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+
+SampleSizeSeason <- DailyAll %>%
+  group_by(Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+
+SampleSizeTracks <- Tracks %>%
+  group_by(fYear,Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+  
+```
+
+
+```{r Levene's test}
+
+Tracks_Long_PB<-Tracks %>%
+  filter(Lon360 < 230, Season=="Post-Breeding") %>%
+  select(TOPPID,SealID,Year,GGBDist,LatDist) %>%
+  pivot_longer(cols = c(GGBDist,LatDist),
+               names_to = "variable",
+               values_to = "value") %>%
+  mutate(variable = as.factor(variable))
+
+leveneTest(y = Tracks_Long_PB$value,
+           group = Tracks_Long_PB$variable,
+           block = Tracks_Long_PB$Year,
+           center = median)
+
+```
+
+
+```{r Distribution of SAFZ Distance}
+
+ggplot(data=All_Females, aes(x=Pct250km, fill=Season)) +
+  geom_histogram(binwidth = 0.05, color="black") + 
+  scale_fill_manual(values=natparks.pals("Yellowstone", 2))+
+  facet_wrap(~Season, ncol=1)
+
+ggplot(data=All_Females, aes(x=Pct250km, color=Season)) +
+  stat_ecdf(geom = "step", linewidth=2) +
+  scale_color_manual(values=natparks.pals("Yellowstone", 2))
+
+```
+
+
+### Post-Breeding Model
+```{r PB Model Data}
+
+# Data subset for model with thinned data
+PBDataAll<- PBSeedAll %>%
+  # Remove first 7 days of track
+  filter(DayOfTrip > 7) %>%
+  # For complete trips, remove last 7 days of track
+  group_by(TOPPID) %>%
+  filter(if_else(TrackQC %in% c(1,2),
+            DayOfTrip < max(DayOfTrip) - 7,
+            TRUE))  %>%
+  ungroup() %>%
+  group_by(TOPPID) %>%
+  #subset to every fifth day
+  filter(row_number() %% 5 == 1) %>%
+  ungroup()%>%
+  mutate(DayOfTrip = as.numeric(DayOfTrip))
+
+# Data subset for model without thinning
+PBDataAll2<- PBSeedAll %>%
+  # Remove first 7 days of track
+  filter(DayOfTrip > 7) %>%
+  # For complete trips, remove last 7 days of track
+  group_by(TOPPID) %>%
+  filter(if_else(TrackQC %in% c(1,2),
+            DayOfTrip < max(DayOfTrip) - 7,
+            TRUE))  %>%
+  ungroup() %>%
+  mutate(DayOfTrip = as.numeric(DayOfTrip))
+
+# Order data frame and define rows where each deployment starts for AR.start vector
+PBDataAll2 <- PBDataAll2[order(PBDataAll2$TOPPID, PBDataAll2$DayOfTrip), ]
+PBDataAll2$AR.start <- c(TRUE, PBDataAll2$TOPPID[-1] != PBDataAll2$TOPPID[-nrow(PBDataAll2)])
+
+```
+
+
+
+```{r Tune rho}
+# Define size and number of coarse and fine steps around median to tests
+coarse_window = 0.3
+n_coarse = 7
+n_fine = 9
+
+# Model formula
+formula =  DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re")
+
+# 1) start with gam with no AR structure
+tmp_gam <- gam(formula, data=PBDataAll2, na.action = "na.fail", method='REML')
+
+PBDataAll2$.resid_tmp <- resid(tmp_gam)
+
+# 2) per-TOPPID lag-1 corr (robust: exclude groups with <2 obs)
+rho_by_group <- PBDataAll2 %>%
+  group_by(!!sym("TOPPID")) %>%
+  summarize(n = n(),
+            lag1 = if(n >= 2) cor(.resid_tmp[-n()], .resid_tmp[-1]) else NA_real_) %>%
+  filter(!is.na(lag1))
+rho_start <- median(rho_by_group$lag1, na.rm = TRUE)
+rho_start <- ifelse(is.na(rho_start), 0, rho_start)  # fallback
+
+# 3) coarse grid around rho_start
+lower <- max(-0.99, rho_start - coarse_window)
+upper <- min(0.99, rho_start + coarse_window)
+rho_grid_coarse <- seq(lower, upper, length.out = n_coarse)
+
+fit_bam_with_rho <- function(r) {
+  bam(formula,
+      data = PBDataAll2,
+      AR.start = PBDataAll2$AR.start,
+      rho = r,
+      method = "fREML",
+      discrete = FALSE)
+}
+
+cat("rho_start (median lag1) = ", signif(rho_start, 3), "\n")
+cat("coarse rho grid: ", paste(round(rho_grid_coarse, 3), collapse = ", "), "\n")
+
+mods_coarse <- lapply(rho_grid_coarse, fit_bam_with_rho)
+gcv_coarse <- sapply(mods_coarse, function(m) m$gcv.ubre)
+best_coarse <- rho_grid_coarse[which.min(gcv_coarse)]
+cat("best coarse rho:", signif(best_coarse,3), "\n")
+
+# 4) fine grid around best coarse
+halfspan <- diff(range(rho_grid_coarse))/ (n_coarse-1) * 1.5
+low2 <- max(-0.99, best_coarse - halfspan)
+up2  <- min(0.99, best_coarse + halfspan)
+rho_grid_fine <- seq(low2, up2, length.out = n_fine)
+mods_fine <- lapply(rho_grid_fine, fit_bam_with_rho)
+gcv_fine <- sapply(mods_fine, function(m) m$gcv.ubre)
+best_fine <- rho_grid_fine[which.min(gcv_fine)]
+cat("fine rho grid: ", paste(round(rho_grid_fine, 3), collapse = ", "), "\n")
+cat("best fine rho:", signif(best_fine,3), "\n")
+
+
+```
+
+
+#### PB Global Model All
+```{r PB Model}
+# Global Model
+
+# Thinned data
+dielmdlPB1 <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+                   data=PBDataAll, na.action = "na.fail", method='fREML')
+
+# All Data no AR
+dielmdlPB2a <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+                   data=PBDataAll2, na.action = "na.fail", method='fREML', select = TRUE)
+
+# All Data AR with AR.start for each deployment
+dielmdlPB2b <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts") + s(DayOfTrip, by=TOPPID, k=6, bs="fs") + s(SealID, bs="re"), data = PBDataAll2, 
+                   AR.start = PBDataAll2$AR.start, rho = 0.378, method = "fREML")
+
+# All Data AR with AR.start for each deployment, no factor smooth
+dielmdlPB2c <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts") + s(SealID, bs="re"), data = PBDataAll2, 
+                    AR.start = PBDataAll2$AR.start, rho = 0.378, method = "fREML")
+
+# All Data, corARMA within TOPPID - this model did not converge
+# dielmdlPB2d <- gamm(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts") + s(DayOfTrip, by = TOPPID, k = 6, bs="fs"),
+#                     random = list(SealID = ~1),
+#                     correlation = corARMA(form = ~1 | TOPPID, p = 1, q = 0),
+#                     data = PBDataAll2, na.action = na.fail, method='REML')
+
+# Intercept model
+dielmdlPB2z <- gam(DielDiff ~ 1, data=PBDataAll2, na.action = "na.fail", method='REML')
+
+# Alternate Model Summaries
+summary(dielmdlPB2b)
+gam.check(dielmdlPB2b)
+summary(dielmdlPB2c)
+gam.check(dielmdlPB2c)
+
+# Final model and intercept model
+summary(dielmdlPB2a)
+summary(dielmdlPB2z)
+
+gam.check(dielmdlPB2a)
+gam.check(dielmdlPB2z)
+
+AICc(dielmdlPB2a, dielmdlPB2z)
+
+draw(dielmdlPB2b,select = c("GGBDist","DayOfTrip"),residuals=TRUE)
+
+# Autocorrelation
+acf(dielmdlPB2a$residuals)
+pacf(dielmdlPB2a$residuals)
+acf(dielmdlPB2b$residuals)
+pacf(dielmdlPB2b$residuals)
+acf(dielmdlPB2c$residuals)
+pacf(dielmdlPB2c$residuals)
+
+# Extract smooths for plotting
+pb_obj<-plot(dielmdlPB2a,residuals=TRUE,rug=TRUE,se=TRUE,pages=0,select=1,scale=0,
+         n=500,n2=40,n3=3,theta=30,phi=30,jit=FALSE,xlab=NULL,
+         ylab=NULL,main=NULL,ylim=NULL,xlim=NULL,too.far=0.1,
+         all.terms=FALSE,shade=TRUE,shade.col="gray80",shift=coef(dielmdlPB2a)[1],
+         trans=I,seWithMean=FALSE,unconditional=FALSE,by.resids=FALSE,
+         scheme=0)
+
+pb_obj <- pb_obj[[1]] # just one smooth so select the first component
+pb_df <- as.data.frame(pb_obj[c("x", "se", "fit")])
+pb_df <- pb_df %>%
+  rename(GGBDist = x) %>%
+  mutate(fit = fit + coef(dielmdlPB2a)[1])
+
+```
+
+
+
+```{r Residual ACF}
+# per-TOPPID distribution of lag-1 residual correlations (after fitting)
+PBDataAll2$resid_noAR <- resid(dielmdlPB2a)
+PBDataAll2$resid_final <- resid(dielmdlPB2b)
+
+per_rho_without <- PBDataAll2 %>%
+  group_by(TOPPID) %>%
+  summarize(n = n(), lag1_after = if(n>=2) cor(resid_noAR[-n()], resid_noAR[-1]) else NA_real_)
+hist(per_rho_without$lag1_after, main = "Per-TOPPID lag1 of initial residuals")
+
+per_rho_after <- PBDataAll2 %>%
+  group_by(TOPPID) %>%
+  summarize(n = n(), lag1_after = if(n>=2) cor(resid_final[-n()], resid_final[-1]) else NA_real_)
+hist(per_rho_after$lag1_after, main = "Per-TOPPID lag1 of final residuals")
+
+# examine a few example TOPPIDs (time series)
+example_ids <- head(unique(PBDataAll2$TOPPID), 6)
+par(mfrow = c(3,2))
+for(id in example_ids) {
+  tmp <- PBDataAll2 %>% filter(TOPPID == id)
+  acf(tmp$resid_final, main = paste("TOPPID", id))
+}
+par(mfrow = c(1,1))
+
+
+plot(dielmdlPB2a, pages=1)
+plot(dielmdlPB2b, pages=1)
+
+```
+
+
+
+
+```{r within-group Diagnostics}
+# pooled residuals
+r <- resid(dielmdlPB2c$lme, type="normalized")
+acf(r)                               # overall
+
+# per-TOPPID residual ACF (example: first 6 TOPPIDs)
+PBDataAll2$fit_resid <- resid(dielmdlPB2c$lme, type="normalized")
+PBDataAll2 %>%
+  group_by(TOPPID) %>%
+  summarize(lag1 = if(n() >= 2) cor(fit_resid[-n()], fit_resid[-1]) else NA) %>%
+  slice_head(n = 6)
+```
+
+
+
+
+### Density Maxima
+```{r Density Maxima GGB}
+
+# Compute density data separately for each group
+dens_data <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(fYear,Season) %>%
+  summarise(density = list(density(GGBDist)), .groups = "drop") %>%
+  mutate(x = purrr::map(density, "x"),  # Extract 'x' values from density object
+         y = purrr::map(density, "y")) %>% # Extract 'y' values from density object
+  select(fYear, Season, x, y) %>%
+  unnest(cols = c(x, y)) # Unnest the density data
+
+# Find the largest maximum (global peak) for each group
+dens_maxima <- dens_data %>%
+  group_by(fYear,Season) %>%
+  slice_max(y, n = 1) %>% # Select the row with the highest density value
+  select(fYear, Season, x)
+
+dens_kurtosis <- dens_data %>%
+  group_by(fYear, Season) %>%
+  summarise(kurtosis = kurtosis(y, na.rm = TRUE), .groups = "drop")
+
+# Compute density data separately for all post-breeding seals
+dens_data_all <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(Season) %>%
+  summarise(density = list(density(GGBDist)), .groups = "drop") %>%
+  mutate(x = purrr::map(density, "x"),  # Extract 'x' values from density object
+         y = purrr::map(density, "y")) %>% # Extract 'y' values from density object
+  select(Season,x, y) %>%
+  unnest(cols = c(x, y)) # Unnest the density data
+
+# Find the largest maximum (global peak) for all post-breeding seals
+dens_maxima_all <- dens_data_all %>%
+  group_by(Season) %>%
+  slice_max(y, n = 1) %>% # Select the row with the highest density value
+  select(Season,x)
+
+dens_kurtosis_all <- dens_data_all %>%
+  group_by(Season) %>%
+  summarise(kurtosis = kurtosis(y, na.rm = TRUE), .groups = "drop")
+
+GGBStats <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(fYear,Season) %>%
+  summarize(N = n_distinct(TOPPID),
+            GGBIQR = IQR(GGBDist, na.rm = TRUE),
+            GGBMAD = mad(GGBDist, na.rm = TRUE),
+            GGBMed = median(GGBDist, na.rm = TRUE),
+            .groups = "drop") %>%
+  left_join(select(dens_maxima,fYear,Season,x),by=c("fYear","Season")) %>%
+  rename(GGBMode = x)%>%
+  left_join(select(dens_kurtosis,fYear,Season,kurtosis),by=c("fYear","Season")) %>%
+    rename(GGBKurt = kurtosis)
+
+GGBStatsAll <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(Season) %>%
+  summarize(N = n_distinct(TOPPID),
+            GGBIQR = IQR(GGBDist, na.rm = TRUE),
+            GGBMAD = mad(GGBDist, na.rm = TRUE),
+            GGBMed = median(GGBDist, na.rm = TRUE),
+            .groups = "drop") %>%
+  left_join(select(dens_maxima_all,Season,x),by=c("Season")) %>%
+  rename(GGBMode = x) %>%
+  left_join(select(dens_kurtosis_all,Season,kurtosis),by="Season") %>%
+    rename(GGBKurt = kurtosis)
+
+rm(dens_data_all,dens_maxima_all,dens_kurtosis,dens_kurtosis_all,dens_data,dens_maxima)
+
+```
+
+
+```{r Density Maxima Lat Dist}
+# Compute density data separately for each group
+dens_data_lat_dist <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(fYear,Season) %>%
+  summarise(density = list(density(LatDist)), .groups = "drop") %>%
+  mutate(x = purrr::map(density, "x"),  # Extract 'x' values from density object
+         y = purrr::map(density, "y")) %>% # Extract 'y' values from density object
+  select(fYear, Season, x, y) %>%
+  unnest(cols = c(x, y)) # Unnest the density data
+
+# Find the largest maximum (global peak) for each group
+dens_maxima_lat_dist <- dens_data_lat_dist %>%
+  group_by(fYear,Season) %>%
+  slice_max(y, n = 1) %>% # Select the row with the highest density value
+  select(fYear, Season, x)
+
+dens_kurtosis_lat_dist <- dens_data_lat_dist %>%
+  group_by(fYear,Season) %>%
+  summarise(kurtosis = kurtosis(y, na.rm = TRUE), .groups = "drop")
+
+# Compute density data separately for all post-breeding seals
+dens_data_lat_all <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(Season) %>%
+  summarise(density = list(density(LatDist)), .groups = "drop") %>%
+  mutate(x = purrr::map(density, "x"),  # Extract 'x' values from density object
+         y = purrr::map(density, "y")) %>% # Extract 'y' values from density object
+  select(Season,x, y) %>%
+  unnest(cols = c(x, y)) # Unnest the density data
+
+# Find the largest maximum (global peak) for all post-breeding seals
+dens_maxima_lat_all <- dens_data_lat_all %>%
+  group_by(Season) %>%
+  slice_max(y, n = 1) %>% # Select the row with the highest density value
+  select(Season,x)
+
+dens_kurtosis_lat_all <- dens_data_lat_all %>%
+  group_by(Season) %>%
+  summarise(kurtosis = kurtosis(y, na.rm = TRUE), .groups = "drop")
+
+LatStats <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(fYear,Season) %>%
+  summarize(LatIQR = IQR(LatDist, na.rm = TRUE),
+            LatMAD = mad(LatDist, na.rm = TRUE),
+            LatMed = median(LatDist, na.rm = TRUE),
+            .groups = "drop") %>%
+  left_join(select(dens_maxima_lat_dist,fYear,Season,x),by=c("fYear","Season")) %>%
+  rename(LatMode = x)%>%
+  left_join(select(dens_kurtosis_lat_dist,fYear,Season,kurtosis),by=c("fYear","Season"))%>%
+    rename(LatKurt = kurtosis)
+
+LatStatsAll <- Tracks %>%
+  filter(Lon360 < 230) %>%
+  group_by(Season) %>%
+  summarize(LatIQR = IQR(LatDist, na.rm = TRUE),
+            LatMAD = mad(LatDist, na.rm = TRUE),
+            LatMed = median(LatDist, na.rm = TRUE),
+            .groups = "drop") %>%
+  left_join(select(dens_maxima_lat_all,Season,x),by=c("Season")) %>%
+  rename(LatMode = x) %>%
+  left_join(select(dens_kurtosis_lat_all,Season,kurtosis),by="Season")%>%
+    rename(LatKurt = kurtosis)
+
+rm(dens_data_lat_all,dens_maxima_lat_all,dens_kurtosis_lat_dist,dens_kurtosis_lat_all,dens_data_lat_dist,dens_maxima_lat_dist)
+
+YearStats <- inner_join(GGBStats,LatStats,by=c("fYear","Season"))
+AllStats <- inner_join(GGBStatsAll,LatStatsAll,by=c("Season"))
+
+```
+
+
+### Plots - Figure 3
+```{r Diel-SAFZ Density Plot PB, echo=FALSE}
+# Compute median for each Season
+medians <- aggregate(DielDiff ~ Season, data = DailyAll, median)
+
+DielSAFZ_Dens<-ggplot()+
+  geom_hex(data=subset(DailyAll, Season=="Post-Breeding" & Year <=2020), aes(x=GGBDist, y=DielDiff),
+           bins = 70, alpha = 0.8) +
+  scale_fill_scico(palette = 'nuuk', limits=c(0,230))+
+  geom_rug(data = PBDataAll2, mapping = aes(x = GGBDist, y = NULL), sides = "b") +
+  geom_ribbon(data=pb_df, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = GGBDist), alpha = 0.5) +
+  geom_line(data=pb_df, aes(x=GGBDist, y=fit), linewidth=1) +
+  geom_hline(aes(yintercept=0), linewidth=1, linetype='dashed', color='black') +
+  annotate("text", x=1450, y=700, label= "Day Deeper than Night") + 
+  annotate("text", x =1450, y=-450, label = "Night Deeper than Day")+
+  xlim(-1000,1800)+
+  ylim(-550,825)+
+  labs(y="Diel Depth Difference (m)",x="Distance from Subarctic Frontal Zone (km)", fill = "Count")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3, colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+DielSAFZ_Dens
+ggsave("Figures/SAFZ_Diel_Density_PB_V2.png", width = 8, height = 4, units = "in", dpi=600)
+```
+
+
+
+### Supplemental Figures
+```{r Diel-Longitude Nearshore, echo=FALSE}
+
+test <- Daily %>%
+  filter(abs(GGBDist)<1000) %>%
+  filter(DayOfTrip > 7) %>%
+  group_by(TOPPID) %>%
+  filter(if_else(TrackQC %in% c(1,2),
+            DayOfTrip < max(DayOfTrip) - 7,
+            TRUE))  %>%
+  ungroup() 
+
+DielLon<-ggplot(data=test, aes(x=Lon360, y=DielDiff))+
+  geom_hex(bins = 70, alpha = 0.8) +
+  scale_fill_scico(palette = 'nuuk', limits=c(0,180))+
+  labs(y="Diel Depth Difference (m)",x="Longitude")+
+  geom_hline(aes(yintercept=0), linewidth=1, linetype='dashed', color='black') +
+  annotate("text", x=45, y=600, label= "Day Deeper than Night") + 
+  annotate("text", x =45, y=-350, label = "Night Deeper than Day")+
+  xlim(170,240)+
+  ylim(-550,825)+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))+
+  facet_wrap(~Season, nrow=2)
+
+DielLon
+ggsave("Figures/SAFZ_Lon_Diel.png", width = 8, height = 6, units = "in", dpi=600)
+```
+
+
+```{r DayDepth-SAFZ Plot, echo=FALSE}
+DielSAFZ<-ggplot(data=DailyAll)+
+  geom_point(aes(x=GGBDist,y=DayDepth,color=DielDiff),alpha=0.6)+
+  scale_fill_scico(palette = 'berlin', limits=c(-750,750))+
+  scale_color_scico(palette = 'berlin', limits=c(-750,750))+
+  ylim(1200,0)+
+  xlim(-1000,2000)+
+  labs(y="Day Depth (m)",x="Distance from Subarctic Frontal Zone (km)")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))+
+  facet_wrap(~Season, nrow=2)
+
+DielSAFZ
+ggsave("Figures/SAFZ_DayDepth.png", width = 8, height = 6, units = "in", dpi=600)
+```
+
+
+```{r NightDepth-SAFZ Plot, echo=FALSE}
+DielSAFZ<-ggplot(data=DailyAll)+
+  geom_point(aes(x=GGBDist,y=NightDepth,color=DielDiff),alpha=0.6)+
+  scale_fill_scico(palette = 'berlin', limits=c(-750,750))+
+  scale_color_scico(palette = 'berlin', limits=c(-750,750))+
+  ylim(1200,0)+
+  xlim(-1000,2000)+
+  labs(y="Night Depth (m)",x="Distance from Subarctic Frontal Zone (km)")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))+
+  facet_wrap(~Season, nrow=2)
+
+DielSAFZ
+ggsave("Figures/SAFZ_NightDepth.png", width = 8, height = 6, units = "in", dpi=600)
+```
+
+
+```{r Density Ridges Vert SAFZ}
+ggplot(data=subset(Tracks,Lon360<230 & Year<=2020))+
+  geom_vridgeline(aes(y=GGBDist, x=fYear, fill=fYear, width = after_stat(density)), stat="ydensity", trim=FALSE, alpha = 0.85, scale = 900)+
+  geom_hline(data = AllStats, aes(yintercept = GGBMode), linewidth=1, linetype='dashed', color='black')+
+  geom_hline(data=AllStats, aes(yintercept = GGBMed + GGBIQR), linewidth=0.5, color='black')+
+  geom_hline(data=AllStats, aes(yintercept = GGBMed - GGBIQR), linewidth=0.5, color='black')+
+  geom_text(data=SampleSizeTracks, aes(y = 2200, x=fYear, label=N))+
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  labs(x="Year",y="Distance from SAFZ (km)")+
+  ylim(-1200,2200)+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.title = element_text(size = 16),
+        axis.title.x = element_blank(),
+        strip.text = element_text(size=14),
+        legend.position = "none")+
+  facet_wrap(~Season, nrow=1)
+
+ggsave("Figures/SAFZ-Year-Dens-Ridges-Vert.png", width = 9, height = 4.5, units = "in", dpi=600)
+
+```
+
+
+```{r Density Ridges Vert - Lat}
+ggplot(data=subset(Tracks,Lon360<230 & Year<=2020))+
+  geom_vridgeline(aes(y=LatDist, x=fYear, fill=fYear, width = after_stat(density)),
+                  stat="ydensity", trim=FALSE, alpha = 0.85, scale = 1400)+
+  geom_hline(data = AllStats, aes(yintercept = LatMode), linewidth=1, linetype='dashed', color='black')+
+  geom_hline(data=AllStats, aes(yintercept = LatMed + LatIQR), linewidth=0.5, color='black')+
+  geom_hline(data=AllStats, aes(yintercept = LatMed - LatIQR), linewidth=0.5, color='black')+
+  scale_color_manual("Year",values=natparks.pals("Acadia",17))+
+  scale_fill_manual("Year",values=natparks.pals("Acadia",17))+
+  labs(x="Year",y="Distance from 43\u00B0 N (km)")+
+  ylim(-1200,2200)+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle=-60, vjust = 0, hjust=),
+        axis.title = element_text(size = 16),
+        strip.text = element_blank(),
+        legend.position = "none")+
+  facet_wrap(~Season, nrow=1)
+
+ggsave("Figures/LatDist-Year-Dens-Ridges-Vert.png", width = 9, height = 4.5, units = "in", dpi=600)
+
+```
+
+

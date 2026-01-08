@@ -1,0 +1,394 @@
+---
+title: "SAFZ Distance and Diel Behavior - PM"
+author: "R.Holser"
+Date Created: February 21, 2025
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+
+```{r Settings, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 14, fig.height = 10, message=FALSE, error=FALSE)
+
+```
+
+Updated at `r Sys.time()`
+
+```{r Load Libaries and Data, echo=FALSE}
+library(tidyverse)
+library(ggExtra)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(scico)
+library(NatParksPalettes)
+library(ggridges)
+library(mgcv)
+library(nlme)
+library(zoo)
+library(MuMIn)
+library(lmtest)
+library(modelsummary)
+library(scales)
+library(lubridate)
+library(gratia)
+library(car)
+library(e1071)
+
+
+Daily<-read.csv('Data/Daily_SAFZDist.csv')
+Tracks<-read.csv('Data/Tracks_SAFZDist.csv')
+SAFZ_Pct<-read.csv('Data/SAFZ_Pct.csv')
+All_Females<-read.csv('Data/NES_All_Individuals.csv')
+
+SAFZ_Pct <- SAFZ_Pct %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Colony','Season'),as.factor))
+
+All_Females<- All_Females %>%
+  #Exclude manipulated females
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  mutate(fYear = as.factor(Year),
+         Season = as.factor(Season),
+         TOPPID = as.factor(TOPPID),
+         SkipBreed = ifelse(is.na(SkipBreed) | SkipBreed == "", "Non-Breed", SkipBreed),
+         SkipBreed = ifelse(SkipBreed == "SkipL" | SkipBreed == "SkipP"| SkipBreed == "skip", "Skip", SkipBreed),
+         SkipBreed = as.factor(SkipBreed)) %>%
+  left_join(select(SAFZ_Pct, TOPPID, Pct250km), by = "TOPPID")
+
+rm(SAFZ_Pct)
+
+Daily <- Daily %>%
+  # Remove manipulated or sick animals
+  filter(!TOPPID %in% c(2017001, 2009019, 2009020, 2009023)) %>%
+  # Convert to factors
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor),
+       DateTime = as.POSIXct(DateTime, tz = "UTC", format = '%d-%b-%Y %H:%M:%S'),
+       DayOfYear = yday(DateTime),
+         # Add a 360 degree longitude column
+         Lon360 = case_when(Lon<0 ~ Lon+360,
+                            TRUE ~ Lon),
+         # Calculate difference between median day and night depths
+         DielDiff = DayDepth - NightDepth,
+         DielDiffAbs = abs(DielDiff),
+         LatDist = (Lat-43)*111) 
+
+# Step 1: Calculate median distance from coast
+CoastCalc <- Daily %>%
+  filter(Lon360<230) %>%
+  group_by(TOPPID) %>%
+  summarize(MedDistCoast230 = median(DistCoast, na.rm = TRUE)) %>%
+  ungroup()
+
+# Step 2: Join this summary to All_Females
+All_Females <- All_Females %>%
+  left_join(CoastCalc, by = "TOPPID") 
+
+# Step 3: Join values from All_Females to Daily and Tracks
+Daily <- Daily %>%
+  # Only keep trips with QC of 1
+  filter(TDRQC==1,!is.na(Lat)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+Tracks<-Tracks %>%
+  mutate(across(c('SealID','TOPPID','Skip','Colony','Season'),as.factor)) %>%
+  left_join(select(All_Females, TOPPID, TripLength, PctBathy1200, MedDistCoast, MedDistCoast230, Pct250km), by = "TOPPID") %>%
+  filter(QCFlag<4) %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))%>%
+  group_by(TOPPID) %>%
+  # filter(max(DayOfTrip) >= 30) %>%
+  mutate(Year = first(Year),
+         PctTrip = max(DayOfTripR)/max(TripLength)) %>%
+  ungroup() %>%
+  #Only include tracks lasting more than 60% of time at sea
+  filter(PctTrip>0.6 | is.na(PctTrip)) %>%
+  #Only include females with mediam distance from the coast greater than 450km
+  filter(MedDistCoast230>450) %>%
+  mutate(LatDist = (Lat-43)*111,
+         fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+DailyAll<-Daily %>%
+  # Exclude all data east of -130 lonitude
+  filter(Lon360 < 230) %>%
+  group_by(TOPPID) %>%
+  mutate(Year = first(Year)) %>%
+  ungroup() %>%
+  mutate(fYear = as.factor(Year),
+         # Drop excess seal and TOPPID levels
+         TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+PBSeedAll <- DailyAll %>%
+  filter(Season=="Post-Breeding") %>%
+  filter(!is.na(DielDiff)) %>%
+  #filter(Buoyancy != "Neutral") %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+PMSeedAll <- DailyAll %>%
+  filter(Season=="Post-Molting") %>%
+  filter(!is.na(DielDiff)) %>%
+  #filter(Buoyancy != "Neutral") %>%
+  mutate(TOPPID = droplevels(TOPPID),
+         SealID = droplevels(SealID))
+
+SampleSizeSeasonYear <- DailyAll %>%
+  group_by(fYear,Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+
+SampleSizeSeason <- DailyAll %>%
+  group_by(Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+
+SampleSizeTracks <- Tracks %>%
+  group_by(fYear,Season) %>%
+  summarise(N = n_distinct(TOPPID), .groups = 'drop')
+  
+```
+
+
+```{r Levene's test}
+
+Tracks_Long_PM<-Tracks %>%
+  filter(Lon360 < 230, Season=="Post-Molting") %>%
+  select(TOPPID,SealID,Year,GGBDist,LatDist) %>%
+  pivot_longer(cols = c(GGBDist,LatDist),
+               names_to = "variable",
+               values_to = "value") %>%
+  mutate(variable = as.factor(variable))
+
+leveneTest(y = Tracks_Long_PM$value,
+           group = Tracks_Long_PM$variable,
+           block = Tracks_Long_PM$Year,
+           center = median)
+
+```
+
+
+### Post-Molting Model
+```{r PM Model Data}
+PMDataAll <- PMSeedAll %>%
+    filter(DayOfTrip > 7) %>%
+  group_by(TOPPID) %>%
+  filter(if_else(TrackQC %in% c(1,2),
+            DayOfTrip < max(DayOfTrip) - 7,
+            TRUE))  %>%  ungroup() %>%
+  group_by(TOPPID) %>%
+  # Subset to every fifth day
+  filter(row_number() %% 5 == 1) %>%
+  ungroup() %>%
+  # Remove points more than 3000 km from GGB
+  filter(GGBDist < 2000) %>%
+  mutate(DayOfTrip = as.numeric(DayOfTrip))
+
+PMDataAll2 <- PMSeedAll %>%
+    filter(DayOfTrip > 7) %>%
+  group_by(TOPPID) %>%
+  filter(if_else(TrackQC %in% c(1,2),
+            DayOfTrip < max(DayOfTrip) - 7,
+            TRUE))  %>%  
+  ungroup() %>%
+  # Remove points more than 3000 km from GGB
+  filter(GGBDist < 2000) %>%
+  mutate(DayOfTrip = as.numeric(DayOfTrip))
+
+PMDataAll2 <- PMDataAll2[order(PMDataAll2$TOPPID, PMDataAll2$DayOfTrip), ]
+PMDataAll2$AR.start <- c(TRUE, PMDataAll2$TOPPID[-1] != PMDataAll2$TOPPID[-nrow(PMDataAll2)])
+
+```
+
+
+
+```{r Tune rho}
+
+coarse_window = 0.3
+n_coarse = 7
+n_fine = 9
+formula =  DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re")
+
+# 1) start with gam with no AR structure
+tmp_gam <- gam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+               data=PMDataAll2, na.action = "na.fail", method='REML')
+
+# 1) start with gam with no AR structure
+tmp_gam <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+               data=PMDataAll2, na.action = "na.fail", method='fREML')
+
+
+PMDataAll2$.resid_tmp <- resid(tmp_gam)
+
+# 2) per-TOPPID lag-1 corr (robust: exclude groups with <2 obs)
+rho_by_group <- PMDataAll2 %>%
+  group_by(!!sym("TOPPID")) %>%
+  summarize(n = n(),
+            lag1 = if(n >= 2) cor(.resid_tmp[-n()], .resid_tmp[-1]) else NA_real_) %>%
+  filter(!is.na(lag1))
+rho_start <- median(rho_by_group$lag1, na.rm = TRUE)
+rho_start <- ifelse(is.na(rho_start), 0, rho_start)  # fallback
+
+# 3) coarse grid around rho_start
+lower <- max(-0.99, rho_start - coarse_window)
+upper <- min(0.99, rho_start + coarse_window)
+rho_grid_coarse <- seq(lower, upper, length.out = n_coarse)
+
+fit_bam_with_rho <- function(r) {
+  bam(formula,
+      data = PMDataAll2,
+      AR.start = PMDataAll2$AR.start,
+      rho = r,
+      method = "fREML",
+      discrete = FALSE)
+}
+
+cat("rho_start (median lag1) = ", signif(rho_start, 3), "\n")
+cat("coarse rho grid: ", paste(round(rho_grid_coarse, 3), collapse = ", "), "\n")
+
+mods_coarse <- lapply(rho_grid_coarse, fit_bam_with_rho)
+gcv_coarse <- sapply(mods_coarse, function(m) m$gcv.ubre)
+best_coarse <- rho_grid_coarse[which.min(gcv_coarse)]
+cat("best coarse rho:", signif(best_coarse,3), "\n")
+
+# 4) fine grid around best coarse
+halfspan <- diff(range(rho_grid_coarse))/ (n_coarse-1) * 1.5
+low2 <- max(-0.99, best_coarse - halfspan)
+up2  <- min(0.99, best_coarse + halfspan)
+rho_grid_fine <- seq(low2, up2, length.out = n_fine)
+mods_fine <- lapply(rho_grid_fine, fit_bam_with_rho)
+gcv_fine <- sapply(mods_fine, function(m) m$gcv.ubre)
+best_fine <- rho_grid_fine[which.min(gcv_fine)]
+cat("fine rho grid: ", paste(round(rho_grid_fine, 3), collapse = ", "), "\n")
+cat("best fine rho:", signif(best_fine,3), "\n")
+
+
+```
+
+```{r PM Model - Global All}
+# Thinned data
+dielmdlPM1 <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+                   data=PMDataAll, na.action = "na.fail", method='fREML')
+
+# All Data no AR
+dielmdlPM2a <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts")+ s(DayOfTrip, by=TOPPID, k = 6, bs="fs") + s(SealID, bs="re"),
+                   data=PMDataAll2, na.action = "na.fail", method='fREML')
+
+# All Data AR with AR.start for each deployment
+dielmdlPM2b <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts") + s(DayOfTrip, by=TOPPID, k=6, bs="fs") + s(SealID, bs="re"), data = PMDataAll2, 
+                   AR.start = PMDataAll2$AR.start, rho = 0.378, method = "fREML")
+
+# All Data AR with AR.start for each deployment, no factor smooth
+dielmdlPM2c <- bam(DielDiff ~ s(GGBDist, k=6, bs="ts") + s(DayOfTrip, k=6, bs="ts") + s(SealID, bs="re"), data = PMDataAll2, 
+                   AR.start = PMDataAll2$AR.start, rho = 0.378, method = "fREML")
+
+# Intercept model
+dielmdlPM2z <- gam(DielDiff ~ 1, data=PMDataAll2, na.action = "na.fail", method='REML')
+
+# Final model summaries
+summary(dielmdlPM2a)
+summary(dielmdlPM2z)
+
+AICc(dielmdlPM2z, dielmdlPM2b, dielmdlPM2c, dielmdlPM2c3)
+
+
+#Other model checks
+summary(dielmdlPM2b)
+summary(dielmdlPM2c)
+gam.check(dielmdlPM2b)
+gam.check(dielmdlPM2c)
+
+acf(dielmdlPM2a$residuals)
+pacf(dielmdlPM2a$residuals)
+acf(dielmdlPM2b$residuals)
+pacf(dielmdlPM2b$residuals)
+acf(dielmdlPM2c$residuals)
+pacf(dielmdlPM2c$residuals)
+acf(dielmdlPM2z$residuals)
+pacf(dielmdlPM2z$residuals)
+
+draw(dielmdlPM2a,select = c("GGBDist","DayOfTrip"),residuals=TRUE)
+
+#Extract smooths for plotting
+pm_obj<-plot(dielmdlPM2a,residuals=TRUE,rug=TRUE,se=TRUE,pages=0,select=1,scale=0,
+         n=500,n2=40,n3=3,theta=30,phi=30,jit=FALSE,xlab=NULL,
+         ylab=NULL,main=NULL,ylim=NULL,xlim=NULL,too.far=0.1,
+         all.terms=FALSE,shade=TRUE,shade.col="gray80",shift=coef(dielmdlPM2a)[1],
+         trans=I,seWithMean=FALSE,unconditional=FALSE,by.resids=FALSE,
+         scheme=0)
+
+pm_obj <- pm_obj[[1]] # just one smooth so select the first component
+pm_df <- as.data.frame(pm_obj[c("x", "se", "fit")])
+pm_df <- pm_df %>%
+  rename(GGBDist = x) %>%
+  mutate(fit = fit + coef(dielmdlPM2a)[1])
+
+```
+
+
+
+```{r Residual ACF}
+# per-TOPPID distribution of lag-1 residual correlations (after fitting)
+PMDataAll2$resid_noAR <- resid(dielmdlPM2a)
+PMDataAll2$resid_final <- resid(dielmdlPM2b)
+
+per_rho_without <- PMDataAll2 %>%
+  group_by(TOPPID) %>%
+  summarize(n = n(), lag1_after = if(n>=2) cor(resid_noAR[-n()], resid_noAR[-1]) else NA_real_)
+hist(per_rho_without$lag1_after, main = "Per-TOPPID lag1 of initial residuals")
+
+per_rho_after <- PMDataAll2 %>%
+  group_by(TOPPID) %>%
+  summarize(n = n(), lag1_after = if(n>=2) cor(resid_final[-n()], resid_final[-1]) else NA_real_)
+hist(per_rho_after$lag1_after, main = "Per-TOPPID lag1 of final residuals")
+
+# examine a few example TOPPIDs (time series)
+example_ids <- head(unique(PMDataAll2$TOPPID), 6)
+par(mfrow = c(3,2))
+for(id in example_ids) {
+  tmp <- PBDataAll2 %>% filter(TOPPID == id)
+  acf(tmp$resid_final, main = paste("TOPPID", id))
+}
+par(mfrow = c(1,1))
+
+
+plot(dielmdlPM2a, pages=1)
+plot(dielmdlPM2b, pages=1)
+
+```
+
+
+
+### Plots - Figure 3
+
+```{r Diel-SAFZ Density Plot PM, echo=FALSE}
+DielSAFZ_Dens<-ggplot(data=subset(DailyAll, Season=="Post-Molting"), aes(x=GGBDist, y=DielDiff))+
+  geom_hex(bins = 70, alpha = 0.8) +
+  scale_fill_scico(palette = 'nuuk', limits=c(0,230))+
+  geom_rug(data = PMDataAll2, mapping = aes(x = GGBDist, y = NULL), sides = "b") +
+  geom_ribbon(data=pm_df, aes(ymin = fit - se, ymax = fit + se, y = NULL, x = GGBDist), alpha = 0.5) +
+  geom_line(data=pm_df, aes(x=GGBDist, y=fit), linewidth=1) +
+  geom_hline(aes(yintercept=0), linewidth=1, linetype='dashed', color='black') +
+  annotate("text", x=1450, y=700, label= "Day Deeper than Night") + 
+  annotate("text", x =1450, y=-450, label = "Night Deeper than Day")+
+  xlim(-1000,1800)+
+  ylim(-550,825)+
+  labs(y="Diel Depth Difference (m)",x="Distance from Subarctic Frontal Zone (km)", fill = "Count")+
+  ggthemes::theme_few()+
+  theme(panel.grid.major = element_line(linewidth=0.3,colour="grey", linetype = "dashed"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size=14))
+
+DielSAFZ_Dens
+ggsave("Figures/SAFZ_Diel_Density_PM_v2.png", width = 8, height = 4, units = "in", dpi=600)
+```
+
