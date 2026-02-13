@@ -3,7 +3,7 @@
 
 Code associated with analysis of movement and foraging success of northern elephant seals in relation to the subarctic frontal zone (SAFZ).
 
-Processed data used in the code provided here are available through this Dryad repository: 
+Processed data used in the code provided here are available through this Dryad repository: https://doi.org/10.5061/dryad.hx3ffbgrs
 
 Raw elephant seal movement data are publicly available through Dryad respositories https://doi.org/10.7291/D1W101 and https://doi.org/10.7291/D18D7W. 
 
